@@ -49,8 +49,16 @@ class GaussianSampler(DataSampler):
             for i, seed in enumerate(seeds):
                 generator.manual_seed(seed)
                 xs_b[i] = torch.randn(n_points, self.n_dims, generator=generator)
+        # 如果scale设置为"random_exp"，每次都生成一个新的随机变换矩阵
         if self.scale is not None:
-            xs_b = xs_b @ self.scale
+            if isinstance(self.scale, str) and self.scale == "random_exp":
+                # 生成一个 n_dims 维的随机对角元素，服从 Exponential(1)
+                eigenvalues = torch.empty(self.n_dims).exponential_()
+                # 调用 sample_transformation 生成随机变换矩阵，并可以选择是否归一化
+                random_scale = sample_transformation(eigenvalues, normalize=True)
+                xs_b = xs_b @ random_scale
+            else:
+                xs_b = xs_b @ self.scale
         if self.bias is not None:
             xs_b += self.bias
         if n_dims_truncated is not None:

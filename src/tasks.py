@@ -203,9 +203,75 @@ class QuadraticRegression(LinearRegression):
         ys_b_quad = ((xs_b**2) @ w_b)[:, :, 0]
         #         ys_b_quad = ys_b_quad * math.sqrt(self.n_dims) / ys_b_quad.std()
         # Renormalize to Linear Regression Scale
+        # The function is y = scale * ((x^2 * w) / 3)
         ys_b_quad = ys_b_quad / math.sqrt(3)
         ys_b_quad = self.scale * ys_b_quad
         return ys_b_quad
+
+
+class KernelRegression(Task):
+    """
+    Implements a kernel regression task based on Gaussian kernels.
+    Task Objective: Given input xs (shape [bsize, n_points, n_dims]),
+    predict the target value of the i+1-th sample by performing a kernel-weighted average of the first i samples.
+    Ground truth is generated similarly to linear_regression: y = scale * (x @ w),
+    where w is a weight sampled for each task.
+    """
+    def __init__(self, n_dims, batch_size, pool_dict=None, seeds=None, scale=1, kernel_bandwidth=1.0):
+        super(KernelRegression, self).__init__(n_dims, batch_size, pool_dict, seeds)
+        self.scale = scale
+        self.kernel_bandwidth = kernel_bandwidth
+        
+        if pool_dict is None and seeds is None:
+            self.w_b = torch.randn(self.b_size, self.n_dims, 1)
+        elif seeds is not None:
+            self.w_b = torch.zeros(self.b_size, self.n_dims, 1)
+            generator = torch.Generator()
+            assert len(seeds) == self.b_size, "Number of seeds must match batch_size"
+            for i, seed in enumerate(seeds):
+                generator.manual_seed(seed)
+                self.w_b[i] = torch.randn(self.n_dims, 1, generator=generator)
+        else:
+            assert "w" in pool_dict, "'w' must be in pool_dict"
+            indices = torch.randperm(len(pool_dict["w"]))[:batch_size]
+            self.w_b = pool_dict["w"][indices]
+
+    def gaussian_kernel(self, X1, X2):
+        diff = X1.unsqueeze(2) - X2.unsqueeze(1)
+        dist_sq = (diff ** 2).sum(dim=-1)
+        K = torch.exp(-dist_sq / (2 * self.kernel_bandwidth ** 2))
+        return K
+
+    def evaluate(self, xs_b):
+        b_size, n_points, n_dims = xs_b.shape
+        predictions = []
+        for t in range(n_points):
+            if t == 0:
+                pred = torch.zeros(b_size, device=xs_b.device)
+            else:
+                x_train = xs_b[:, :t, :]
+                y_train = self.scale * (x_train @ self.w_b).squeeze(-1)
+                x_test = xs_b[:, t:t+1, :]
+                K = self.gaussian_kernel(x_train, x_test)
+                K = K.squeeze(-1)
+                numerator = (K * y_train).sum(dim=-1)
+                denominator = K.sum(dim=-1) + 1e-8
+                pred = numerator / denominator
+            predictions.append(pred.unsqueeze(1))
+        predictions = torch.cat(predictions, dim=1)
+        return predictions
+
+    @staticmethod
+    def generate_pool_dict(n_dims, num_tasks, **kwargs):
+        return {"w": torch.randn(num_tasks, n_dims, 1)}
+
+    @staticmethod
+    def get_metric():
+        return squared_error
+
+    @staticmethod
+    def get_training_metric():
+        return mean_squared_error
 
 
 class Relu2nnRegression(Task):
