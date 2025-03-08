@@ -60,6 +60,7 @@ def get_task_sampler(
         "quadratic_regression": QuadraticRegression,
         "relu_2nn_regression": Relu2nnRegression,
         "decision_tree": DecisionTree,
+        "gaussian_kernel_regression": GaussianKernelRegression,
     }
     if task_name in task_names_to_classes:
         task_cls = task_names_to_classes[task_name]
@@ -209,71 +210,6 @@ class QuadraticRegression(LinearRegression):
         return ys_b_quad
 
 
-class KernelRegression(Task):
-    """
-    Implements a kernel regression task based on Gaussian kernels.
-    Task Objective: Given input xs (shape [bsize, n_points, n_dims]),
-    predict the target value of the i+1-th sample by performing a kernel-weighted average of the first i samples.
-    Ground truth is generated similarly to linear_regression: y = scale * (x @ w),
-    where w is a weight sampled for each task.
-    """
-    def __init__(self, n_dims, batch_size, pool_dict=None, seeds=None, scale=1, kernel_bandwidth=1.0):
-        super(KernelRegression, self).__init__(n_dims, batch_size, pool_dict, seeds)
-        self.scale = scale
-        self.kernel_bandwidth = kernel_bandwidth
-        
-        if pool_dict is None and seeds is None:
-            self.w_b = torch.randn(self.b_size, self.n_dims, 1)
-        elif seeds is not None:
-            self.w_b = torch.zeros(self.b_size, self.n_dims, 1)
-            generator = torch.Generator()
-            assert len(seeds) == self.b_size, "Number of seeds must match batch_size"
-            for i, seed in enumerate(seeds):
-                generator.manual_seed(seed)
-                self.w_b[i] = torch.randn(self.n_dims, 1, generator=generator)
-        else:
-            assert "w" in pool_dict, "'w' must be in pool_dict"
-            indices = torch.randperm(len(pool_dict["w"]))[:batch_size]
-            self.w_b = pool_dict["w"][indices]
-
-    def gaussian_kernel(self, X1, X2):
-        diff = X1.unsqueeze(2) - X2.unsqueeze(1)
-        dist_sq = (diff ** 2).sum(dim=-1)
-        K = torch.exp(-dist_sq / (2 * self.kernel_bandwidth ** 2))
-        return K
-
-    def evaluate(self, xs_b):
-        b_size, n_points, n_dims = xs_b.shape
-        predictions = []
-        for t in range(n_points):
-            if t == 0:
-                pred = torch.zeros(b_size, device=xs_b.device)
-            else:
-                x_train = xs_b[:, :t, :]
-                y_train = self.scale * (x_train @ self.w_b).squeeze(-1)
-                x_test = xs_b[:, t:t+1, :]
-                K = self.gaussian_kernel(x_train, x_test)
-                K = K.squeeze(-1)
-                numerator = (K * y_train).sum(dim=-1)
-                denominator = K.sum(dim=-1) + 1e-8
-                pred = numerator / denominator
-            predictions.append(pred.unsqueeze(1))
-        predictions = torch.cat(predictions, dim=1)
-        return predictions
-
-    @staticmethod
-    def generate_pool_dict(n_dims, num_tasks, **kwargs):
-        return {"w": torch.randn(num_tasks, n_dims, 1)}
-
-    @staticmethod
-    def get_metric():
-        return squared_error
-
-    @staticmethod
-    def get_training_metric():
-        return mean_squared_error
-
-
 class Relu2nnRegression(Task):
     def __init__(
         self,
@@ -400,6 +336,135 @@ class DecisionTree(Task):
     @staticmethod
     def generate_pool_dict(n_dims, num_tasks, hidden_layer_size=4, **kwargs):
         raise NotImplementedError
+
+    @staticmethod
+    def get_metric():
+        return squared_error
+
+    @staticmethod
+    def get_training_metric():
+        return mean_squared_error
+
+
+class GaussianKernelRegression(Task):
+    """
+    Represents a function of the form:
+        f(x) = sum_{i=1}^{R} alpha_i * exp( -|| x - c_i ||^2 / (2*sigma^2) ).
+    The 'centers' c_i and 'alphas' alpha_i are sampled either from random
+    normal distributions, or from a pre-defined pool_dict, or using seeds
+    for deterministic generation.
+
+    Args:
+        n_dims: input dimension
+        batch_size: number of tasks in each batch
+        pool_dict: optional dictionary that stores pre-generated centers/alphas
+        seeds: optional list of seeds to generate deterministic data
+        R: number of Gaussian kernel centers
+        sigma: kernel bandwidth
+        scale: an optional scale factor on top of the final sum
+        valid_coords: if we want to only use part of the dimension for the centers
+                      (similar to "curriculum" or "sparse" style).
+    """
+
+    def __init__(self,
+                 n_dims,
+                 batch_size,
+                 pool_dict=None,
+                 seeds=None,
+                 R=10,
+                 sigma=1.0,
+                 scale=1.0,
+                 valid_coords=None):
+        super(GaussianKernelRegression, self).__init__(n_dims, batch_size, pool_dict, seeds)
+
+        self.R = R
+        self.sigma = sigma
+        self.scale = scale
+        self.valid_coords = valid_coords if valid_coords is not None else n_dims
+
+        self.centers = torch.zeros(self.b_size, R, n_dims)
+        self.alphas = torch.zeros(self.b_size, R)
+
+        if pool_dict is None and seeds is None:
+            self._random_init()
+        elif seeds is not None:
+            if len(seeds) != self.b_size:
+                raise ValueError(f"Expected {self.b_size} seeds, got {len(seeds)}")
+            self._init_with_seeds(seeds)
+        elif pool_dict is not None:
+            self._init_from_pool(pool_dict)
+        else:
+            raise ValueError("Unhandled combination of pool_dict and seeds")
+
+    def _random_init(self):
+        self.centers = torch.randn(self.b_size, self.R, self.n_dims)
+        self.alphas = torch.randn(self.b_size, self.R)
+        self._truncate_dimensions()
+
+    def _init_with_seeds(self, seeds):
+        for i, seed in enumerate(seeds):
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+
+            tmp_centers = torch.randn(self.R, self.n_dims, generator=generator)
+            tmp_alphas = torch.randn(self.R, generator=generator)
+
+            self.centers[i] = tmp_centers
+            self.alphas[i] = tmp_alphas
+        self._truncate_dimensions()
+
+    def _init_from_pool(self, pool_dict):
+        C_all = pool_dict["centers"]
+        A_all = pool_dict["alphas"]
+
+        if len(C_all) != len(A_all):
+            raise ValueError("pool_dict mismatch: centers and alphas differ in length")
+
+        if len(C_all) < self.b_size:
+            raise ValueError("pool_dict not large enough for this batch_size")
+
+        indices = torch.randperm(len(C_all))[: self.b_size]
+        self.centers = C_all[indices].clone()
+        self.alphas  = A_all[indices].clone()
+        self._truncate_dimensions()
+
+    def _truncate_dimensions(self):
+        if self.valid_coords < self.n_dims:
+            self.centers[:, :, self.valid_coords:] = 0
+
+    def evaluate(self, xs_b):
+        device = xs_b.device
+        b_size, n_points, _ = xs_b.shape
+
+        centers_b = self.centers.to(device)
+        alphas_b = self.alphas.to(device)
+        valid_coords = self.valid_coords
+
+        ys_b = torch.zeros(b_size, n_points, device=device)
+
+        for b in range(b_size):
+            c_b = centers_b[b][:, :valid_coords]
+            xs_valid = xs_b[b][:, :valid_coords]
+
+            diff = xs_valid.unsqueeze(1) - c_b.unsqueeze(0)
+            dist_sq = (diff ** 2).sum(dim=2)
+
+            kernel_vals = torch.exp(-dist_sq / (2.0 * self.sigma**2))
+            y_b = (kernel_vals * alphas_b[b]).sum(dim=1)
+            ys_b[b] = self.scale * y_b
+
+        return ys_b
+
+    @staticmethod
+    def generate_pool_dict(n_dims, num_tasks, R=10, sigma=1.0, scale=1.0, **kwargs):
+        centers = torch.randn(num_tasks, R, n_dims)
+        alphas = torch.randn(num_tasks, R)
+
+        pool_dict = {
+            "centers": centers,
+            "alphas": alphas,
+        }
+        return pool_dict
 
     @staticmethod
     def get_metric():

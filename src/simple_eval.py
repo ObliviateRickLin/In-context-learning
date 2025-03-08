@@ -1,0 +1,1 @@
+import sys; import os; sys.path.append("."); import eval; import models; from models import build_model; model_path = sys.argv[1]; print(f"Evaluating model: {model_path}"); model, conf = eval.get_model_from_run(model_path); print(f"Model: {model}"); print(f"Config: {conf}")

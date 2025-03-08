@@ -1,11 +1,11 @@
 name: in-context-learning
 channels:
-  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch
   - pytorch
   - defaults
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch
 dependencies:
   - pip=21.2.4
-  - python=3.8.12
+  - python=3.9.6
   - pytorch=1.11.0
   - pip:
     - jupyter==1.0.0

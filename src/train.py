@@ -67,7 +67,7 @@ def train(model, args):
         data_sampler_args = {}
         task_sampler_args = {}
 
-        if "sparse" in args.training.task:
+        if "sparse" in args.training.task or "gaussian_kernel_regression" in args.training.task:
             task_sampler_args["valid_coords"] = curriculum.n_dims_truncated
         if num_training_examples is not None:
             assert num_training_examples >= bsize
