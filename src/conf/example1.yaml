@@ -1,0 +1,30 @@
+inherit:
+  - base.yaml
+
+model:
+  n_dims: 10    # 10-dimensional input
+  n_positions: 50  # Maximum context length, adjustable
+
+training:
+  task: example1        # Use our new Example1Task
+  data: uniform01       # Sample uniformly from [0,1]^10
+  task_kwargs:
+    noise_std: 1.74     # Corresponds to SNR=3:1 in the original paper
+  curriculum:
+    # Example curriculum: train from 5 to 30 in-context samples
+    points:
+      start: 15
+      end: 40
+      inc: 5
+      interval: 1000
+    # Keep n_dims_truncated constant at 4
+    dims:
+      start: 4
+      end: 4
+      inc: 0
+      interval: 99999999
+
+out_dir: ../models/example1_run
+
+wandb:
+  name: "example1_incontext" 

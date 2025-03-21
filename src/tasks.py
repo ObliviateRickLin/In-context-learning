@@ -61,6 +61,7 @@ def get_task_sampler(
         "relu_2nn_regression": Relu2nnRegression,
         "decision_tree": DecisionTree,
         "gaussian_kernel_regression": GaussianKernelRegression,
+        "example1": Example1Task,
     }
     if task_name in task_names_to_classes:
         task_cls = task_names_to_classes[task_name]
@@ -472,4 +473,94 @@ class GaussianKernelRegression(Task):
 
     @staticmethod
     def get_training_metric():
+        return mean_squared_error
+
+
+class Example1Task(Task):
+    """
+    Implements Example 1 from the paper: 10-dimensional input, first 4 dimensions are effective signals.
+    f(x) = 5*g1(x^(1)) + 3*g2(x^(2)) + 4*g3(x^(3)) + 6*g4(x^(4)) + noise
+    where:
+      g1(t) = t
+      g2(t) = (2t - 1)^2
+      g3(t) = sin(2πt) / (2 - sin(2πt))
+      g4(t) = 0.1 sin(2πt) + 0.2 cos(2πt) + 0.3 sin^2(2πt)
+              + 0.4 cos^3(2πt) + 0.5 sin^3(2πt)
+    """
+
+    def __init__(self, n_dims, batch_size, pool_dict=None, seeds=None,
+                 noise_std=1.74,  # Original paper uses ~1.74 for SNR=3:1
+                 **kwargs):
+        """
+        Args:
+            noise_std: Standard deviation of noise, ~1.74 in original paper for SNR=3:1
+        """
+        super().__init__(n_dims, batch_size, pool_dict, seeds)
+        self.noise_std = noise_std
+
+        # Define the four basis functions
+        def g1(t):
+            return t
+        
+        def g2(t):
+            return (2.0 * t - 1.0) ** 2
+        
+        def g3(t):
+            return torch.sin(2.0 * math.pi * t) / (2.0 - torch.sin(2.0 * math.pi * t))
+        
+        def g4(t):
+            return (0.1 * torch.sin(2.0 * math.pi * t)
+                    + 0.2 * torch.cos(2.0 * math.pi * t)
+                    + 0.3 * torch.sin(2.0 * math.pi * t)**2
+                    + 0.4 * torch.cos(2.0 * math.pi * t)**3
+                    + 0.5 * torch.sin(2.0 * math.pi * t)**3)
+
+        self.g_funcs = [g1, g2, g3, g4]
+        self.coefs = [5.0, 3.0, 4.0, 6.0]
+
+    def evaluate(self, xs_b: torch.Tensor) -> torch.Tensor:
+        """
+        xs_b: shape = [batch_size, n_points, n_dims], where n_dims=10
+        Returns ys_b: shape = [batch_size, n_points]
+        """
+        device = xs_b.device
+        b_size, n_points, d = xs_b.shape
+
+        # Ensure d>=4 as we need first 4 dims to compute f(x)
+        assert d >= 4, f"Expected at least 4 dims, got d={d}"
+
+        ys_b = torch.zeros(b_size, n_points, device=device)
+
+        for i in range(b_size):
+            # Get all x for current sample (n_points, d)
+            x_i = xs_b[i]
+            # Get first 4 dimensions
+            x1, x2, x3, x4 = x_i[:, 0], x_i[:, 1], x_i[:, 2], x_i[:, 3]
+
+            # Compute value term by term
+            val = torch.zeros(n_points, device=device)
+            for func, c, xcol in zip(self.g_funcs, self.coefs, [x1, x2, x3, x4]):
+                val += c * func(xcol)
+
+            # Add noise
+            noise = torch.randn(n_points, device=device) * self.noise_std
+            val += noise
+
+            ys_b[i] = val
+
+        return ys_b
+
+    @staticmethod
+    def generate_pool_dict(n_dims, num_tasks, **kwargs):
+        # This example doesn't need any pre-generated parameters
+        return None
+
+    @staticmethod
+    def get_metric():
+        # Use squared error
+        return squared_error
+
+    @staticmethod
+    def get_training_metric():
+        # Use mean squared error for training
         return mean_squared_error
