@@ -1,0 +1,29 @@
+inherit:
+  - base.yaml
+
+model:
+  n_dims: 60
+  n_positions: 80
+
+training:
+  task: example2          
+  data: uniform01         
+  task_kwargs:
+    noise_std: 0.72       
+  batch_size: 64
+  curriculum:
+    points:
+      start: 10
+      end: 80
+      inc: 10
+      interval: 1000
+    dims:
+      start: 12
+      end: 60
+      inc: 4
+      interval: 1500
+
+out_dir: ../models/example2_run
+
+wandb:
+  name: "example2_incontext"

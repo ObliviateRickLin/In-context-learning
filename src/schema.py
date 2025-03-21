@@ -42,7 +42,8 @@ TASK_LIST = [
     "decision_tree",
     "quadratic_regression",
     "gaussian_kernel_regression",
-    "example1"
+    "example1",
+    "example2"
 ]
 
 training_schema = {

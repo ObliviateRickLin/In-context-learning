@@ -62,6 +62,7 @@ def get_task_sampler(
         "decision_tree": DecisionTree,
         "gaussian_kernel_regression": GaussianKernelRegression,
         "example1": Example1Task,
+        "example2": Example2Task,
     }
     if task_name in task_names_to_classes:
         task_cls = task_names_to_classes[task_name]
@@ -563,4 +564,117 @@ class Example1Task(Task):
     @staticmethod
     def get_training_metric():
         # Use mean squared error for training
+        return mean_squared_error
+
+class Example2Task(Task):
+    """
+    Implements Example 2 from the paper:
+    60-dimensional input，总共有 12 个有效变量（前 12 维），并且每 4 维对应和 Example1 相同的 g1,g2,g3,g4 函数。
+    其函数形式为:
+      f(x) = g1(x1) + g2(x2) + g3(x3) + g4(x4)
+           + 1.5*g1(x5) + 1.5*g2(x6) + 1.5*g3(x7) + 1.5*g4(x8)
+           + 2*g1(x9) + 2*g2(x10) + 2*g3(x11) + 2*g4(x12)
+    并在其基础上加高斯噪声 (noise_std ~ 0.72).
+    剩余 x13,...,x60 均为无用变量(不影响 f ).
+    """
+
+    def __init__(self, 
+                 n_dims, 
+                 batch_size,
+                 pool_dict=None, 
+                 seeds=None,
+                 # 这里的 0.72≈sqrt(0.5184),对标原文SNR=3:1
+                 noise_std=0.72,  
+                 **kwargs):
+        super().__init__(n_dims, batch_size, pool_dict, seeds)
+        self.noise_std = noise_std
+
+        # 跟 Example1 里相同的四个基函数:
+        def g1(t):
+            return t
+
+        def g2(t):
+            return (2.0 * t - 1.0) ** 2
+
+        def g3(t):
+            return torch.sin(2.0 * math.pi * t) / (2.0 - torch.sin(2.0 * math.pi * t))
+
+        def g4(t):
+            return (0.1 * torch.sin(2.0 * math.pi * t)
+                    + 0.2 * torch.cos(2.0 * math.pi * t)
+                    + 0.3 * (torch.sin(2.0 * math.pi * t))**2
+                    + 0.4 * (torch.cos(2.0 * math.pi * t))**3
+                    + 0.5 * (torch.sin(2.0 * math.pi * t))**3)
+
+        # 为了方便，我们按数组存储
+        self.g_funcs = [g1, g2, g3, g4]  # 基础函数
+        # 每组系数: [1, 1, 1, 1], [1.5, 1.5, 1.5, 1.5], [2, 2, 2, 2]
+        self.amplitudes = [
+            [1.0,  1.0,  1.0,  1.0 ],
+            [1.5,  1.5,  1.5,  1.5 ],
+            [2.0,  2.0,  2.0,  2.0 ],
+        ]
+
+    def evaluate(self, xs_b: torch.Tensor) -> torch.Tensor:
+        """
+        xs_b: shape = [batch_size, n_points, n_dims], 这里 n_dims=60
+        Returns ys_b: shape = [batch_size, n_points]
+        """
+        device = xs_b.device
+        b_size, n_points, d = xs_b.shape
+
+        # 原文 Example 2 假设 d=60，但只用到前12维
+        assert d >= 12, f"Example2Task expects at least 12 dims, got d={d}"
+
+        ys_b = torch.zeros(b_size, n_points, device=device)
+
+        for i in range(b_size):
+            x_i = xs_b[i]  # shape=(n_points, d)
+            # 先取 x1~x12
+            # block1: x[0:4], block2: x[4:8], block3: x[8:12]
+            # 与 4 个函数 g1,g2,g3,g4 配对
+            val = torch.zeros(n_points, device=device)
+
+            # 第 1 组: amplitudes = [1,1,1,1]
+            for j in range(4):
+                func = self.g_funcs[j]
+                amp  = self.amplitudes[0][j]
+                xcol = x_i[:, j]   # x(1), x(2), x(3), x(4)
+                val += amp * func(xcol)
+
+            # 第 2 组: amplitudes = [1.5,1.5,1.5,1.5]
+            for j in range(4):
+                func = self.g_funcs[j]
+                amp  = self.amplitudes[1][j]
+                xcol = x_i[:, 4 + j]  # x(5)~x(8)
+                val += amp * func(xcol)
+
+            # 第 3 组: amplitudes = [2.0,2.0,2.0,2.0]
+            for j in range(4):
+                func = self.g_funcs[j]
+                amp  = self.amplitudes[2][j]
+                xcol = x_i[:, 8 + j]  # x(9)~x(12)
+                val += amp * func(xcol)
+
+            # 后面 x(13)~x(60) 不影响 f(x)
+
+            # 加上高斯噪声
+            noise = torch.randn(n_points, device=device) * self.noise_std
+            val += noise
+
+            ys_b[i] = val
+
+        return ys_b
+
+    @staticmethod
+    def generate_pool_dict(n_dims, num_tasks, **kwargs):
+        # 跟 Example1 类似，如果不需要 pool_dict 可直接返回 None
+        return None
+
+    @staticmethod
+    def get_metric():
+        return squared_error  # 用 squared error 评估
+
+    @staticmethod
+    def get_training_metric():
         return mean_squared_error
